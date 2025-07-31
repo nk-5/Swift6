@@ -10,12 +10,15 @@ import SwiftUI
 
 /*
 * Swift Concurrency Checking (SWIFT_STRICT_CONCURRENCY)の状態にも依存する
-*   - Minimal: （最も緩い、Swift 5相当）
-*   - Targeted: （一部のエラーが有効）
-*   - complete: (Swift 6の完全なconcurrencyチェック）
+*   - Minimal: 明示的にSendableを採用している箇所で、Sendable制約とアクター隔離をチェック
+*   - Targeted: Minimalに加え、暗黙的にSendableが採用されている箇所でもSendable制約とアクター隔離をチェック
+*   - complete: (Swift 6の完全なconcurrencyチェック）モジュール全体を通してSendable制約とアクター隔離をチェック
+* refs: https://tech-blog.cluster.mu/entry/2025/07/25
+* refs: https://zenn.dev/coconala/articles/407d73903e6f2c
 */
 
 
+/* ------------------------------------------------------------------------------------------------------------*/
 /*
  * Infer Isolated Conformances
  * Noの場合：❌  Conformance of 'HogeViewModel' to protocol 'HogeProtocol' crosses into main actor-isolated code and can cause data races; this is an error in the Swift 6 language mode
@@ -42,7 +45,7 @@ class InferIsolatedConformancesDesc {
     }
 }
 
-
+/* ------------------------------------------------------------------------------------------------------------*/
 /*
  * nonisolated(nonsending) By Default
  * Yes（安全側）: デフォルトでnonisolated(nonsending) を付与するので、呼び出し元のisolated domainと同じdomainで実行される
@@ -68,7 +71,7 @@ class Repository { // Sendable でなくても OK
     }
 }
 
-
+/* ------------------------------------------------------------------------------------------------------------*/
 /*
  * Disable Outward Actor Isolation Inference
  * クロスモジュール間における actor 隔離の推論（inference）を抑制するオプション
@@ -98,13 +101,14 @@ class DisableOutwardActorIsolationInference {
     }
 }
 
-
+/* ------------------------------------------------------------------------------------------------------------*/
 /*
  * Global-Actor-Isolated Types Usability
  * グローバルアクター（たとえば @MainActor）で隔離された型の使いやすさをどう扱うかを制御する
  * Yes: Logger のインスタンス化や格納が許容される（Swift 5 系の動作互換性を維持）
  * No: Logger の型自体が MainActor に隔離されているため、非 @MainActor の文脈で使うとエラーになる（Swift 6 の厳格なコンパイルチェックが有効になり、安全だが制限も増える。
- * TODO: Xcode26-beta4でNoでもエラーにならない
+ * TODO: Xcode26-beta4でNoでもエラーにならない、🔴未反映 or 未完成Yes/No で変化しない（制限されない）
+
  */
 
 class GlobalActorIsolatedTypesUsability {
@@ -131,7 +135,7 @@ class GlobalActorIsolatedTypesUsability {
 
 }
 
-
+/* ------------------------------------------------------------------------------------------------------------*/
 /*
  * Infer Sendable for Methods and Key Path Literals
  * クロージャが @Sendable であれば、その中でキャプチャされるメソッドや関数が Sendable かどうかを、コンパイラが自動で検査・推論します。
@@ -174,4 +178,143 @@ class NewStyle {
             greeter.greet(name: "Swift") // ✅ OK：自動で安全性チェック、通る場合は推論してくれる
         }
     }
+}
+
+/* ------------------------------------------------------------------------------------------------------------*/
+/*
+ * Dynamic Actor Isolation
+ * アクター隔離を「動的に切り替える」＝プロトコルやクロージャで動的に actor を判断できるようにする。
+ * 実行時にアクター分離違反をチェックし、問題があればアサーション（プログラムのクラッシュ）として報告するメカニズムを導入します。
+ * Yes: actorの隔離メンバーにアクセスできる（実行時隔離）、nonisolated(unsafe)が使える
+ * No: actorメンバーへのアクセスは禁止される
+ * 具体例：
+ *  1. Objective-Cとの相互運用: Objective-Cで書かれたコードなど、Swiftの静的な並行処理ルールに準拠できない外部フレームワークと連携する場合。
+ *   2. 非厳密な並行処理コンテキストからの呼び出し: まだ厳密な並行処理チェックが適用されていないモジュール（@preconcurrencyでマークされたものなど）から、アクター分離されたコードを呼び出す場合。
+ * @preconcurrencyは、このような古い、あるいはまだ並行処理に最適化されていないモジュールや型、関数に対して、一時的に厳密な並行処理チェックを緩和するために使用されます。
+ */
+
+
+
+/* ------------------------------------------------------------------------------------------------------------*/
+/*
+ * Isolated Default Value
+ * 関数のデフォルト引数値や格納プロパティの初期値が、その宣言のアクター分離要件を満たす必要があるというルールと、その関連するコンパイラ設定について
+ * Yes: コンパイラは、デフォルト引数や格納プロパティの初期値が、その宣言のアクター分離要件を満たしているかを厳密にチェックするようになる
+ * No: コンパイラは、デフォルト引数や格納プロパティの初期値に対するアクター分離チェックを緩和します。
+ * TODO: そもそもデフォルト値にインスタンスプロパティを付与することはできないので気にしなくて良い？
+ */
+
+//class IsolatedDefaultValue {
+//    class Hoge {
+//        var name: String = "aaa"
+//
+//        func setName(a: String) {
+//            name = a
+//        }
+//
+//    }
+//
+//    @MainActor
+//    class MyView {
+//        var someData: Int = 0
+//
+////        func update() { // ここで問題が発生しうる
+//        func update(value: Int = someData) { // ここで問題が発生しうる
+////        func update(value: Hoge = .init()) { // ここで問題が発生しうる
+//            run(value: someData)
+//        }
+//
+//        func run(value: Int = 0) {
+//
+//        }
+//    }
+//}
+
+
+
+
+/* ------------------------------------------------------------------------------------------------------------*/
+/*
+ * Isolated Global Variables
+ */
+
+
+/* ------------------------------------------------------------------------------------------------------------*/
+/*
+ * Region Based Isolation
+ * Region Based Isolation では、非Sendableな値が Isolation Boundary を跨ぐ場合でも、値が以降のコードで再利用されないことをコンパイラが検出できればエラーが発生しない
+ */
+
+class RegionBasedIsolation {
+    // Sendable に準拠していない（または明示的に準拠させていない）クラス
+    // クラスは参照型であり、Sendable でないと複数スレッドでの共有は危険
+    class NonSendableCounter {
+        var value: Int = 0
+
+        func increment() {
+            value += 1
+        }
+
+        func getValue() -> Int {
+            return value
+        }
+    }
+
+    // Global actor に分離されていないため、異なる Task からアクセスすると危険
+    var globalCounter = NonSendableCounter() // グローバル変数もデフォルトでは安全に共有できない
+
+    @MainActor
+    func demonstrateRegionBasedIsolationError() async {
+        print("--- Region Based Isolation Error Demonstration ---")
+        globalCounter.increment()
+
+        // Task 1: globalCounter を変更しようとする
+        let task1 = Task {
+            // ここでコンパイルエラーが発生します！
+            // エラーメッセージ例:
+            // "Reference to captured var 'globalCounter' in concurrently-executing code is not 'Sendable' and cannot be referenced from a stricter concurrency context"
+            // または類似の「captured var」や「not Sendable」に関するエラー
+            print("thread is  \(Thread().isMainThread)") // (エラーがなければ)
+            globalCounter.increment()
+            print("Task 1 incremented: \(globalCounter.getValue())") // (エラーがなければ)
+        }
+
+//        // Task 2: 同時に globalCounter を変更しようとする
+//        let task2 = Task {
+//            // ここでもコンパイルエラーが発生します！
+//            globalCounter.increment()
+//            print("Task 2 incremented: \(globalCounter.getValue())") // (エラーがなければ)
+//        }
+
+//        _ = await [task1.value]
+//                _ = await [task1.value, task2.value]
+    }
+
+    class Client {
+        var name: String
+        var initialBalance: Double
+
+        init(name: String, initialBalance: Double) {
+            self.name = name
+            self.initialBalance = initialBalance
+      }
+    }
+
+    actor ClientStore {
+        var clients: [Client] = []
+
+        static let shared = ClientStore()
+
+        func addClient(_ c: Client) {
+            clients.append(c)
+        }
+    }
+
+    func openNewAccount(name: String, initialBalance: Double) async {
+        let client = Client(name: name, initialBalance: initialBalance)
+        await ClientStore.shared.addClient(client)
+//        print(client.name)
+    }
+
+
 }

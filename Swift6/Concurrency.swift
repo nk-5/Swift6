@@ -31,6 +31,7 @@ class InferIsolatedConformancesDesc {
         let name: String
     }
 
+    // protocolはnonisolation
     protocol HogeProtocol {
         func fetch() -> User
     }
@@ -48,6 +49,7 @@ class InferIsolatedConformancesDesc {
 /* ------------------------------------------------------------------------------------------------------------*/
 /*
  * nonisolated(nonsending) By Default
+ * 呼び出し元のアクターを継承して実行するかどうか
  * Yes（安全側）: デフォルトでnonisolated(nonsending) を付与するので、呼び出し元のisolated domainと同じdomainで実行される
  * No（従来の緩い挙動）: デフォルトでnonisolated(nonsending) を付与しないので呼び出し元とは異なるisolated domainの場合はエラーになる
  * Migrate:
@@ -75,29 +77,56 @@ class Repository { // Sendable でなくても OK
 /*
  * Disable Outward Actor Isolation Inference
  * クロスモジュール間における actor 隔離の推論（inference）を抑制するオプション
+ * 型のメンバー関数（インスタンスメソッドやプロパティなど）に対して「暗黙的に actor 隔離を推論する」機能を有効/無効にするかを制御します。
  * Yes: モジュールBではMainActorがないとみなされ、logger.log(...) は actor-isolated と見なされず、警告やエラーになる可能性あり
  * No: モジュールAのMainActorが伝播し、 logger.log(...) は MainActor 上で動くよう扱われる
  */
 
+import Module
+
 class DisableOutwardActorIsolationInference {
     // ModuleA
-    @MainActor
-    public class Logger {
-        public init() {}
-
-        public func log(_ message: String) {
-            print("log:", message)
-        }
-    }
+//    @MainActor
+//    public class Logger {
+//        public init() {}
+//
+//        public func log(_ message: String) {
+//            print("log:", message)
+//        }
+//    }
 
     // ModuleB (App side)
 
     //import ModuleA
 
+//    @MainActor
+//    func perform() {
+//        let logger = Module.Logger()
+////        let logger = Logger()
+//        logger.log("Hello") // ← actor-isolatedと推論されるかどうかがポイント
+//    }
+
+
     @MainActor
-    func perform() {
-        let logger = Logger()
-        logger.log("Hello") // ← actor-isolatedと推論されるかどうかがポイント
+    class ViewModel: LoggerProtocol {
+        var title: String = "Hello"
+
+        func greet() {
+            print(title) // OK：titleもMainActor隔離されている
+        }
+
+        func log(_ message: String) {
+        }
+    }
+
+//    @MainActor
+    func run(vm: ViewModel) {
+
+        Task.detached {
+            let logger = Module.Logger()
+            await logger.log("hello")
+            await print(vm.title) // ❌ MainActorに隔離されたプロパティに非同期からアクセス → コンパイルエラー
+        }
     }
 }
 
@@ -107,11 +136,29 @@ class DisableOutwardActorIsolationInference {
  * グローバルアクター（たとえば @MainActor）で隔離された型の使いやすさをどう扱うかを制御する
  * Yes: Logger のインスタンス化や格納が許容される（Swift 5 系の動作互換性を維持）
  * No: Logger の型自体が MainActor に隔離されているため、非 @MainActor の文脈で使うとエラーになる（Swift 6 の厳格なコンパイルチェックが有効になり、安全だが制限も増える。
- * TODO: Xcode26-beta4でNoでもエラーにならない、🔴未反映 or 未完成Yes/No で変化しない（制限されない）
+ * TODO: Xcode26-beta4でNoでもエラーにならない
 
  */
 
 class GlobalActorIsolatedTypesUsability {
+//    class NonSendable {
+//      func test() {}
+//    }
+//
+//    @MainActor
+//    class IsolatedSubclass: NonSendable {
+//      var mutable = 0
+//      override func test() {
+//        super.test()
+////        mutable += 0 // error: Main actor-isolated property 'mutable' can not be referenced from a non-isolated context
+//      }
+//
+//        func trySendableCapture() {
+//            Task.detached { @Sendable in
+//                self.test() // error: Capture of 'self' with non-sendable type 'IsolatedSubclass' in a `@Sendable` closure
+//            }
+//        }
+//    }
 
     @MainActor
     class Logger {
@@ -133,6 +180,7 @@ class GlobalActorIsolatedTypesUsability {
 //        logger.log("Hello")    // ← さらに別の actor-isolation エラーも
     }
 
+    let logger: Logger = .init()
 }
 
 /* ------------------------------------------------------------------------------------------------------------*/
@@ -316,5 +364,20 @@ class RegionBasedIsolation {
 //        print(client.name)
     }
 
-
+//    final class NonSendableGreeter {
+//        var name: String = "Swift"
+//
+//        func greet() {
+//            print("Hello, \(name)")
+//        }
+//    }
+//
+//    func run() {
+//        let greeter = NonSendableGreeter()
+//
+//        // 明示的に Task の中に閉じ込める
+//        Task.detached { @Sendable in
+//            greeter.greet() // ⚠️ Region Based Isolation = No だとコンパイルエラー
+//        }
+//    }
 }

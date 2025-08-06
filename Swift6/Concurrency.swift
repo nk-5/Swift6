@@ -52,7 +52,7 @@ class InferIsolatedConformancesDesc {
  * 呼び出し元のアクターを継承して実行するかどうか
  * Yes（安全側）: デフォルトでnonisolated(nonsending) を付与するので、呼び出し元のisolated domainと同じdomainで実行される
  * No（従来の緩い挙動）: デフォルトでnonisolated(nonsending) を付与しないので呼び出し元とは異なるisolated domainの場合はエラーになる
- * Migrate:
+ * Migrate: Swift 5 互換を保ちつつ、一部に警告を出しながら Yes へ移行していくモード（警告が出るがコンパイルは通る）
  */
 
 struct NonisolatedNonsendingByDefaultView: View {
@@ -61,7 +61,7 @@ struct NonisolatedNonsendingByDefaultView: View {
     var body: some View {
         EmptyView()
             .task {
-                await repository.load() // エラーが発生しない
+                await repository.load() // Yesだとエラーが発生しない
             }
     }
 }
@@ -80,11 +80,13 @@ class Repository { // Sendable でなくても OK
  * 型のメンバー関数（インスタンスメソッドやプロパティなど）に対して「暗黙的に actor 隔離を推論する」機能を有効/無効にするかを制御します。
  * Yes: モジュールBではMainActorがないとみなされ、logger.log(...) は actor-isolated と見なされず、警告やエラーになる可能性あり
  * No: モジュールAのMainActorが伝播し、 logger.log(...) は MainActor 上で動くよう扱われる
+ * https://developer.apple.com/documentation/xcode/build-settings-reference#Disable-Outward-Actor-Isolation-Inference
+ * Swift6では常に有効
  */
 
 import Module
 
-class DisableOutwardActorIsolationInference {
+final class DisableOutwardActorIsolationInference: Sendable {
     // ModuleA
 //    @MainActor
 //    public class Logger {
@@ -128,16 +130,58 @@ class DisableOutwardActorIsolationInference {
             await print(vm.title) // ❌ MainActorに隔離されたプロパティに非同期からアクセス → コンパイルエラー
         }
     }
+
+    actor DataStore {
+        var logs: [String] = []
+
+        func save(log: String) {
+            // プライベート関数を呼び出す
+            addTimestampAndSave(log)
+        }
+
+        // この時点では、どのスレッドで実行されるべきか明記していない
+        // だが、private なのでコンパイラが「DataStoreの一部だ」と推論してくれる
+        func addTimestampAndSave(_ message: String) {
+            // ❌ await なしで logs にアクセスできている
+            //    -> この関数が DataStore アクター上で実行されている証拠
+            logs.append("\(Date()): \(message)")
+            print("ログを保存しました。")
+        }
+    }
+
+    @MainActor
+    func runTest() async {
+        let store = DataStore()
+
+        print("テストを開始します...")
+
+        // 外部のアクター(@MainActor)からDataStoreのメソッドを呼び出す
+        // これにより、アクターの境界を越えるため、厳格なチェックが必ず行われる
+        await store.save(log: "アクターの境界を越えた呼び出し")
+
+        print("テストが完了しました。")
+    }
+
+    func runTestHoge() {
+        // テストの実行
+//        Task { @MainActor in
+        Task {
+            await self.runTest()
+        }
+    }
 }
+
+
 
 /* ------------------------------------------------------------------------------------------------------------*/
 /*
  * Global-Actor-Isolated Types Usability
+ * 主な目的は、プロパティにnonisolated(unsafe)とマークする必要性を減らすことです。
  * グローバルアクター（たとえば @MainActor）で隔離された型の使いやすさをどう扱うかを制御する
  * Yes: Logger のインスタンス化や格納が許容される（Swift 5 系の動作互換性を維持）
  * No: Logger の型自体が MainActor に隔離されているため、非 @MainActor の文脈で使うとエラーになる（Swift 6 の厳格なコンパイルチェックが有効になり、安全だが制限も増える。
- * TODO: Xcode26-beta4でNoでもエラーにならない
-
+ * https://developer.apple.com/documentation/xcode/build-settings-reference#Disable-Outward-Actor-Isolation-Inference
+ * Swift6では常に有効、すなわちnonisolated(unsafe)は省略される
  */
 
 class GlobalActorIsolatedTypesUsability {
@@ -160,8 +204,9 @@ class GlobalActorIsolatedTypesUsability {
 //        }
 //    }
 
-    @MainActor
+//    @MainActor
     class Logger {
+        var text: String = ""
         func log(_ message: String) {
             print(message)
         }
@@ -181,6 +226,45 @@ class GlobalActorIsolatedTypesUsability {
     }
 
     let logger: Logger = .init()
+
+
+
+    // メインアクターに分離されたクラス
+    @MainActor
+    class UserData {
+        var name: String // StringはSendableではないが、@MainActorによって保護される
+        var logger = Logger()  // ← ⚠️ Global-Actor-Isolated Types Usability = No ならここでエラー
+
+        init(name: String) {
+            self.name = name
+        }
+
+        func printUserName() {
+            print("現在のユーザー名: \(name)")
+        }
+
+        // 非同期でユーザー名を更新する関数
+        func updateUserName(newName: String) async {
+            // メインアクター上で実行されるため、nameへのアクセスは安全
+            self.name = newName
+            print("ユーザー名を \(newName) に更新しました。")
+        }
+    }
+
+    // 別のアクター（例: グローバルな非同期タスク）からUserDataを操作する
+//    func performUserUpdate() async {
+//        let user = UserData(name: "初期ユーザー")
+//        await user.printUserName() // メインアクターに切り替えて実行される
+//
+//        // メインアクターに切り替えてupdateUserNameを呼び出す
+//        await user.updateUserName(newName: "新しいユーザー名")
+//        await user.printUserName()
+//    }
+
+    // 非同期処理を開始
+//    Task {
+//        await performUserUpdate()
+//    }
 }
 
 /* ------------------------------------------------------------------------------------------------------------*/
@@ -212,18 +296,17 @@ class GlobalActorIsolatedTypesUsability {
 //}
 
 class NewStyle {
-    // TODO: YesでもSendable付与しないとSendableなクロージャ内の呼び出しでコンパイルエラーになる、推論されていない??
-    final class Greeter: Sendable {
+    class Greeter {
         func greet(name: String) {
             print("Hello, \(name)")
         }
     }
 
-    func run() {
+    func run(greeter: Greeter) async {
         let greeter = Greeter()
 
-        Task.detached { @Sendable in
-            greeter.greet(name: "Swift") // ✅ OK：自動で安全性チェック、通る場合は推論してくれる
+        Task.detached {
+            greeter.greet(name: "Swift") // ✅ Swift6.2からはSendableであればコンパイル通る：自動で安全性チェック、通る場合は推論してくれる
         }
     }
 }
@@ -380,4 +463,50 @@ class RegionBasedIsolation {
 //            greeter.greet() // ⚠️ Region Based Isolation = No だとコンパイルエラー
 //        }
 //    }
+}
+
+class ImplicitlyOpenedExtentials {
+    // Equatableに準拠した何らかの値を保持するプロトコル
+    protocol Holdable {
+        associatedtype Value: Equatable
+        var storedValue: Value { get }
+    }
+
+    // 上記プロトコルに準拠した具体的な型
+    struct StringHolder: Holdable {
+        var storedValue: String
+    }
+
+    // 存在型（any Holdable）の変数
+    let anything: any Holdable = StringHolder(storedValue: "Swift")
+
+    // 機能が有効な場合、ジェネリックなメソッドを直接呼び出せる
+    // 以前は、any Holdable型から具体的な型を取り出すための複雑な処理が必要だった
+    func areEqual<T: Holdable>(_ val1: T, _ val2: T) -> Bool {
+        return val1.storedValue == val2.storedValue
+    }
+
+    func hoge() {
+        print(anything.storedValue)
+    }
+
+    // anythingが内部で自動的に展開され、ジェネリック関数に渡される
+    // areEqual(anything, anything) // このような直接比較はできないが、
+    // コンパイラがanyの扱いをより賢く行うようになるのがこの機能の趣旨
+
+    protocol Animal {
+        func speak()
+    }
+
+    struct Dog: Animal {
+        func speak() { print("Woof") }
+    }
+
+    struct Cat: Animal {
+        func speak() { print("Meow") }
+    }
+
+    func run() {
+        let a: Animal = Dog()
+    }
 }
